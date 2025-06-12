@@ -57,7 +57,18 @@ C10_HOST_DEVICE static void reduce_fraction(size_t &numerator, size_t &denominat
 //template for changing MAX_NUM_THREADS based on op dtype
 template <typename T>
 struct mnt_wrapper {
+#ifdef ROCM
+  // static constexpr int MAX_NUM_THREADS = 256;
+  // XXX:
+  // 1) Potential register spillage?
+  // 2) Possible launch failure due to inadequate LDS?
+  // 3) AMD 64-thread wavefront vs. NVIDIA 32-thread warp
+  // static constexpr int MAX_NUM_THREADS = 1024;
   static constexpr int MAX_NUM_THREADS = 512;
+#else
+  // Sweet spot
+  static constexpr int MAX_NUM_THREADS = 512;
+#endif
 };
 
 template <>
@@ -99,7 +110,9 @@ struct ReduceConfig {
     const int max_num_threads = mnt_wrapper<T>::MAX_NUM_THREADS / output_vec_size;
     int dim0_pow2 = dim0 < max_num_threads ? static_cast<int>(last_pow2(dim0)) : max_num_threads;
     int dim1_pow2 = dim1 < max_num_threads ? static_cast<int>(last_pow2(dim1)) : max_num_threads;
-    block_width = std::min(dim0_pow2, int(at::cuda::warp_size()));
+    // XXX: `at::cuda:warp_size` is supposed to be portable because HIP masquerades as CUDA.
+    block_width = std::min(dim0_pow2, at::cuda::warp_size());
+    // block_width = std::min(dim0_pow2, C10_WARP_SIZE);
     block_height = std::min(dim1_pow2, int(max_num_threads / block_width));
     block_width = std::min(dim0_pow2, int(max_num_threads / block_height));
     num_threads = block_width * block_height;
@@ -179,10 +192,12 @@ struct ReduceConfig {
     return offset;
   }
 
+  // XXX: `at::cuda:warp_size` is supposed to be portable because HIP masquerades as CUDA.
   int shared_memory_size() const {
     if (!should_block_y_reduce() &&
         (!should_block_x_reduce() ||
          block_width <= at::cuda::warp_size())) {
+         // block_width <= C10_WARP_SIZE)) {
       return 0;
     }
     return element_size_bytes * num_threads * output_vec_size;
@@ -206,6 +221,10 @@ struct ReduceConfig {
     return sizeof(int) * grid().x;
   }
 
+  // The number of input elements that a single thread is
+  // responsible for partially reducing sequentially in a loop.
+  // It has an inverse relationship with `step_input` that is
+  // essentially the total parallelism factor across the entire GPU grid.
   int values_per_thread() const {
     return div_up(num_inputs, step_input);
   }
@@ -990,7 +1009,7 @@ int get_output_vec_size(const TensorIterator &iter) {
   return vec_size;
 }
 
-template<typename arg_t, typename scalar_t, int vt0, int input_vec_size=vt0>
+template<typename arg_t, typename scalar_t, int vt0, int input_vec_size = vt0>
 ReduceConfig setReduceConfig(const TensorIterator& iter){
   // Start by assuming that each thread handles a single output and all
   // the inputs for that output.
@@ -1036,11 +1055,24 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
       fastest_moving_stride = iter.strides(/*arg=*/input_index)[iter.num_reduce_dims()];
     }
   } else {
+    // A scalar is treated as being perfectly contiguous,
+    // so its "stride" is simply the size fo the element itself.
     reduction_on_fastest_striding_dimension = true;
     fastest_moving_stride = sizeof(scalar_t);
     dim0 = 1;
     dim1 = 1;
   }
+
+  bool strided_with_high_latency = false;
+#ifdef USE_ROCM
+  // Heuristic only for ROCm: If the physically fastest-moving dimension is not perfectly contiguous
+  // (i.e., its stride in bytes is not equal to the size of a single element being reduced), we are
+  // in a high-latency scenario where (aggressive) parallelism may be harmful because each single thread
+  // would consequently be handling small workload, which leads to stalling due to memory access latency.
+  if (fastest_moving_stride != sizeof(scalar_t)) {
+    strided_with_high_latency = true;
+  }
+#endif
 
   // We do vectorization to gain better memory access, there are two cases which we call
   // "vectorize along input" and "vectorize along output". Note that the "input/output"
@@ -1084,10 +1116,10 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
     // Split the input across lanes if the input is contiguous in the reduced
     // dimension. This will require reduction between threads using warp
     // shuffle instructions and shared memory (if block_width > warpSize).
-    config.input_mult[0] = config.split_input(block_width);
+    config.input_mult[ReduceConfig::BLOCK_X] = config.split_input(block_width);
   } else {
     // Otherwise split the output across lanes in a warp.
-    config.output_mult[0] = config.split_output(block_width);
+    config.output_mult[ReduceConfig::BLOCK_X] = config.split_output(block_width);
   }
 
   constexpr int min_values_per_thread = 16;
@@ -1096,12 +1128,26 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
   const int warp_split_threshold =
       std::min<int>(block_height * 16, max_values_per_thread);
   bool split_across_warps = config.values_per_thread() >= warp_split_threshold;
-  const int num_mp =
+
+  // For ROCm, prevent splitting across warps.
+  if (strided_with_high_latency) {
+    // For this specific high-latency case on ROCm, we prevent
+    // further (warp level) parallelization to force more work per thread.
+    // This increases `ReduceConfig::values_per_thread` to hide memory latency.
+    // Concretely, by making it `false`, we prevent splitting across warps (`RecduceConfig::input_mult[ReduceConfig::BLOCK_Y]`).
+    // This is expected to make each warp work independently on a larger task slice,
+    // which increases `values_per_thread` within the warp and consequently hides latency.
+    // This in turn prevents grid-level splitting, as the condition for that
+    // requires `config.input_mult[ReduceConfig::BLOCK_Y] != 0`.
+    split_across_warps = false;
+  }
+
+  const int num_mps =
       at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
 #ifdef USE_ROCM
   bool force_splitting_output = iter.ndim() == 2 &&
       reduction_on_fastest_striding_dimension &&
-      config.values_per_thread() < 1024 && num_mp < 100;
+      config.values_per_thread() < 1024 && num_mps < 100;
   split_across_warps = !force_splitting_output && split_across_warps;
 #endif
 
@@ -1109,10 +1155,14 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
     // Divide the input across warps in a thread-block, if that leaves at least
     // 16 elements to be summed by each thread. This will require inter-warp
     // reduction using shared memory.
-    config.input_mult[1] = config.split_input(block_height);
+    config.input_mult[ReduceConfig::BLOCK_Y] = config.split_input(block_height);
   } else {
     // Otherwise, each warp handles a separate output.
-    config.output_mult[1] = config.split_output(block_height);
+    // Meanwhile, `ReduceConfig::step_input` remains small,
+    // which makes `ReduceConfig::values_per_thread` large.
+    // The larger workload per thread is supposed to allow the GPU to
+    // issue multiple independent memory requests and hide the high latency.
+    config.output_mult[ReduceConfig::BLOCK_Y] = config.split_output(block_height);
   }
 
   int max_threads_per_mp =
@@ -1121,15 +1171,33 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
   // Control the number of threadblocks by adjusting the maximum number of
   // threads per multi-processor. These numbers better reflect the maximum
   // theoretical achievable threads per MP for the reduction operation.
-  if (iter.ndim() == 1 || iter.ndim() == 3)
+  //
+  // XXX:
+  // Are they empirical values too conservative for MI300X and other more adcanced accelerators?
+  // Or should we customize the value based on the detailed architectures of AMD GPUs?
+  if (iter.ndim() == 1 || iter.ndim() == 3) {
     max_threads_per_mp = 512;
-  if (iter.ndim() == 2)
+  } else if (iter.ndim() == 2) {
     max_threads_per_mp = 256;
+  }
 #endif
   const int blocks_per_sm = max_threads_per_mp / config.num_threads;
-  const int target_grid_size = num_mp * blocks_per_sm;
+  const int target_grid_size = num_mps * blocks_per_sm;
   int grid = config.grid().x;
-  if (config.input_mult[1] != 0 && config.values_per_thread() >= max_values_per_thread && grid <= target_grid_size) {
+
+  // For ROCm, prevent grid-level splitting that is
+  // the final, most aggressive level of parallelization.
+  bool split_at_grid_level = config.should_block_y_reduce() &&
+      config.values_per_thread() >= max_values_per_thread && grid <= target_grid_size;
+  if (strided_with_high_latency) {
+    // Prevent splitting across the entire grid for the same reason as "split_across_warps".
+    // This ensures `values_per_thread` remains as large as possible.
+    split_at_grid_level = false;
+  }
+
+
+  // if (config.input_mult[1] != 0 && config.values_per_thread() >= max_values_per_thread && grid <= target_grid_size) {
+  if (split_at_grid_level) {
     // Divide the input across thread-blocks if the amount of work per-thread
     // is large enough and the size of the output is small enough. This will
     // require a reduction using global memory.
@@ -1144,27 +1212,34 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
     // max_values_per_thread
     config.ctas_per_output = std::max(std::min<int>(ctas_per_output1, ctas_per_output2), ctas_per_output3);
 #ifdef USE_ROCM
-    // In cases where a number of threadblocks along the y direction of the grid
-    // is needed then make sure they are reduced to the number of MPs. For
+    // In cases where a number of thread-blocks along the y direction of the grid
+    // are needed then make sure they are reduced to the number of MPs. For
     // smaller sizes, use half the number of MPs. For smaller sizes than half
     // the number of MPs use the original value unless the value is less than 16
     // blocks in which case it is more profitable to use just 1 block.
-    if (config.ctas_per_output > num_mp)
-      if (num_mp < 128)
+    //
+    // XXX:
+    // Are these values empirical? Are they optimal for MI300X with 304 CUs?
+    // Or should we customize the value based on the detailed architectures of AMD GPUs?
+    if (config.ctas_per_output > num_mps) {
+      if (num_mps < 128) {
         config.ctas_per_output =
-            num_mp * (config.ctas_per_output > 512 ? 4 : 2);
-      else
-        config.ctas_per_output = num_mp;
-    else if (config.ctas_per_output > div_up(num_mp, 2))
-      config.ctas_per_output = div_up(num_mp, 2);
-    else if (config.ctas_per_output < 16)
+            num_mps * (config.ctas_per_output > 512 ? 4 : 2);
+      } else {
+        config.ctas_per_output = num_mps;
+      }
+    } else if (config.ctas_per_output > div_up(num_mps, 2)) {
+      config.ctas_per_output = div_up(num_mps, 2);
+    } else if (config.ctas_per_output < 16) {
       config.ctas_per_output = 1;
+    }
     bool is_channel_last = iter.tensor_base(1).is_contiguous(at::MemoryFormat::ChannelsLast);
     if (iter.ndim() == 3 && !reduction_on_fastest_striding_dimension && !is_channel_last)
       config.ctas_per_output = 4;
 #endif
     if (config.ctas_per_output > 1) {
-      config.input_mult[2] = config.split_input(config.ctas_per_output);
+      // Split input across thread-blocks.
+      config.input_mult[ReduceConfig::CTA] = config.split_input(config.ctas_per_output);
     }
   }
   return config;
