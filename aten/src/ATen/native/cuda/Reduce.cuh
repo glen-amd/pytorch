@@ -1013,12 +1013,20 @@ template<typename arg_t, typename scalar_t, int vt0, int input_vec_size = vt0>
 ReduceConfig setReduceConfig(const TensorIterator& iter){
   // Start by assuming that each thread handles a single output and all
   // the inputs for that output.
+  // These two represents the logical dimensions of the reduction task in question.
+  // In the context of reduction, this is the number of independent reduction
+  // operations to perform. For a full reduction on an entire tensor, this is 1.
   int64_t num_outputs = iter.num_output_elements();
+  // This is the number of elements that are reduced to produce
+  // a single partial reduction output. For a full reduction on
+  // an entire tensor, this is the total number of elements in the tensor.
   int64_t inputs_per_output = iter.numel() / num_outputs;
   int input_index = iter.ntensors() - 1;
 
   auto config = ReduceConfig(sizeof(arg_t), num_outputs, inputs_per_output);
 
+  // These two are the logical GPU block dimensions that
+  // can be used to set the thread block dimensions.
   int64_t dim0;
   int64_t dim1;
   int64_t fastest_moving_stride;
@@ -1040,13 +1048,16 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
     // We try to max out dim1 so that we have enough threads per CTA to deliver
     // performance for larger problem size.
     if (reduction_on_fastest_striding_dimension) {
+      // The ideal case:
       // Map block.x to the fastest reducing dimension. It implies:
       //   1. block_x_reduce is required.
       //   2. block.y now max out to num_outputs.
       dim0 = inputs_per_output;
       dim1 = num_outputs;
+      // Essentially `sizeof(scalar_t)`
       fastest_moving_stride = iter.strides(/*arg=*/input_index)[0];
     } else {
+      // The less ideal case handled by flipping:
       // Map block.x to the fastest non reducing dimension. It implies:
       //   1. block_x_reduce is turned off.
       //   2. block.y now max out to inputs_per_output.
@@ -1081,13 +1092,13 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
   //
   // Case 1: "vectorize along input"
   // This case happens when we are reducing along fastest moving dimesion. In such case, threads
-  // with the same threadIdx.y works on the same reduction cooperatively and will produce results
-  // for the same output. In such case, values in each loaded vector always correspond to the same output.
+  // with the same threadIdx.y (i.e., in the same warp) works on the same reduction cooperatively and will produce results
+  // for the same output. In such case, values (loaded in a single vector instruction) in each loaded vector always correspond to the same output.
   //
   // Case 2: "vectorize along output"
   // This case happens when the fastest moving dimesion is not the dimension of reduction. In such case,
   // threads with different threadIdx.x are independent and will produce results for different outputs.
-  // In such case, values in each loaded vector always correspond to different outputs.
+  // In such case, values (loaded in a single vector instruction) in each loaded vector always correspond to different outputs.
   if (fastest_moving_stride == sizeof(scalar_t)) {
 #ifdef USE_ROCM
     if (reduction_on_fastest_striding_dimension && dim0 > 128 && iter.num_reduce_dims() == 1) {
@@ -1098,10 +1109,12 @@ ReduceConfig setReduceConfig(const TensorIterator& iter){
       // Note that if vt0 < ReduceConfig::vec_size, then this means the register pressure could be high, in such case,
       // we should avoid vectorization.
       config.vectorize_input = true;
+      // The logical width after vectorization
       dim0 /= input_vec_size;
     } else if (!reduction_on_fastest_striding_dimension) {
       // Case 2: "vectorize along output"
       config.output_vec_size = get_output_vec_size<scalar_t>(iter);
+      // The logical width after vectorization
       dim0 /= config.output_vec_size;
     }
   }
