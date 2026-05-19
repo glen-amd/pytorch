@@ -135,10 +135,30 @@ inline __host__ __device__ uint32_t getAlignmentRoundUp(const void* p) {
 
 #if defined(USE_ROCM)
 // TODO: Support RDNA
+// CDNA arch with MFMA and Wave64 support.
+// FIXME: GFX1250 warp/wavefront size
 constexpr int32_t kWarpSize = 64;
 
 template<typename T, uint32_t Rank>
 using VecT = T __attribute__((ext_vector_type(Rank)));
+
+// Conceptual only for now and subject to change:
+// gfx1250 cannot simply be added to the CDNA2+ path below.
+// gfx950 (CDNA4) vs. gfx1250
+// MFMA vs. WMMA
+// Wave64/32 vs. Wave32 only
+// Intrinsics __builtin_amdgcn_mfma_* vs. __builtin_amdgcn_wmma_*
+//
+// Maybe different tile sizes, layouts, register layouts, and loading patterns.
+#ifdef __gfx1250__
+#define GFX12_CDNA5_OR_LATER 1
+#else
+#define GFX12_CDNA5_OR_LATER 0
+#endif
+
+static bool isCDNA5orLater(int index) {
+  return at::detail::getCUDAHooks().isGPUArch({"gfx1250"}, index);
+}
 
 static bool isCDNA2orLater(int index) {
     return at::detail::getCUDAHooks().isGPUArch({"gfx90a", "gfx942", "gfx950"}, index);
@@ -1109,6 +1129,11 @@ at::Tensor _weight_int4pack_mm_cuda(
       A.device() == B.device() && A.device() == qScaleAndZeros.device());
 
 #if defined(USE_ROCM)
+  if (isCDNA5orLater(A.device().index())) {
+    TORCH_CHECK(false,
+                "_weight_int4pack_mm_cuda is not yet supported on gfx1250. "
+                "A WMMA-based implementation is required for gfx1250.");
+  }
   if (!isCDNA2orLater(A.device().index())) {
     TORCH_CHECK(false, "_weight_int4pack_mm_cuda is only supported on AMD gpu arch greater than or equal to CDNA2");
   }
@@ -1304,6 +1329,11 @@ at::Tensor _convert_weight_to_int4pack_cuda(
   TORCH_CHECK(innerKTiles == 2 || innerKTiles == 4 || innerKTiles == 8);
 
 #if defined(USE_ROCM)
+  if (isCDNA5orLater(in.device().index())) {
+    TORCH_CHECK(false,
+                "_convert_weight_to_int4pack_cuda is not yet supported on gfx1250. "
+                "A WMMA-based implementation is required for gfx1250.");
+  }
   if (!isCDNA2orLater(in.device().index())) {
     TORCH_CHECK(false, "_convert_weight_to_int4pack_cuda is only supported on AMD gpu arch greater than or equal to CDNA2");
   }

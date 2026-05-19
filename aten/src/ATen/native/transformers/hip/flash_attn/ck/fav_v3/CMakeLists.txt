@@ -25,6 +25,8 @@ if(NOT EXISTS "${CODEGEN_VENV_DIR}/bin/python3")
 endif()
 
 # Generate AITER/CK Asm code (using the venv python so pandas is new enough)
+# TODO: More gfx1250 support once AITER codegen and embedded HSA artifacts
+# are ready for gfx1250.
 execute_process(
     COMMAND ${CMAKE_COMMAND} -E env "AITER_GPU_ARCHS=gfx942;gfx950"
             "${CODEGEN_VENV_DIR}/bin/python3" ${CMAKE_SOURCE_DIR}/third_party/aiter/hsa/codegen.py -m fmha_v3_bwd --output_dir ${CMAKE_CURRENT_LIST_DIR}

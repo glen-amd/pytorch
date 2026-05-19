@@ -211,19 +211,19 @@ if(USE_FLASH_ATTENTION)
     elseif(NOT WIN32)
       caffe2_update_option(USE_ROCM_CK_SDPA ON)
     endif()
-    # CK SDPA only supports gfx942/gfx950. Auto-disable when none of those archs
+    # CK SDPA only supports gfx942/gfx950/gfx1250. Auto-disable when none of those archs
     # are in PYTORCH_ROCM_ARCH; otherwise the ck_sdpa target ends up with an
     # empty HIP_ARCHITECTURES and CMake errors out.
     if(USE_ROCM_CK_SDPA)
       set(_have_ck_sdpa_arch FALSE)
-      foreach(ARCH gfx942 gfx950)
+      foreach(ARCH gfx942 gfx950 gfx1250)
         if("${ARCH}" IN_LIST PYTORCH_ROCM_ARCH)
           set(_have_ck_sdpa_arch TRUE)
           break()
         endif()
       endforeach()
       if(NOT _have_ck_sdpa_arch)
-        message(STATUS "USE_ROCM_CK_SDPA disabled: PYTORCH_ROCM_ARCH (${PYTORCH_ROCM_ARCH}) has no MI3xx arch (gfx942/gfx950)")
+        message(STATUS "USE_ROCM_CK_SDPA disabled: PYTORCH_ROCM_ARCH (${PYTORCH_ROCM_ARCH}) has no supported arch (gfx942/gfx950/gfx1250)")
         caffe2_update_option(USE_ROCM_CK_SDPA OFF)
       endif()
     endif()
@@ -310,10 +310,11 @@ if(USE_FLASH_ATTENTION)
 
     set_source_files_properties(${ck_sdpa_sources_hip} PROPERTIES LANGUAGE HIP)
 
-    # Only build for MI3xx series architectures as building for all targets takes too long
+    # Only build for supported architectures (gfx942/gfx950/gfx1250) as building
+    # for all targets takes too long.
     # We will selectively add supported architectures when/if needed
     set(_ck_sdpa_hip_arches "")
-    foreach(ARCH gfx942 gfx950)
+    foreach(ARCH gfx942 gfx950 gfx1250)
       if("${ARCH}" IN_LIST PYTORCH_ROCM_ARCH)
         list(APPEND _ck_sdpa_hip_arches ${ARCH})
       endif()
@@ -438,18 +439,18 @@ IF(USE_MSLK)
     # Add MSLK include directories for gemm_torch.h
     list(APPEND ATen_CUDA_INCLUDE ${MSLK_INCLUDE})
   elseif(USE_ROCM)
-    # MSLK only supports gfx942/gfx950. Auto-disable when none of those archs
+    # MSLK only supports gfx942/gfx950/gfx1250. Auto-disable when none of those archs
     # are in PYTORCH_ROCM_ARCH; otherwise the mslk target ends up with an empty
     # HIP_ARCHITECTURES and CMake errors out.
     set(_mslk_hip_arches "")
-    foreach(ARCH gfx942 gfx950)
+    foreach(ARCH gfx942 gfx950 gfx1250)
       if(${ARCH} IN_LIST PYTORCH_ROCM_ARCH)
         list(APPEND _mslk_hip_arches ${ARCH})
       endif()
     endforeach()
   endif()
   if(USE_MSLK AND USE_ROCM AND _mslk_hip_arches STREQUAL "")
-    message(STATUS "USE_MSLK disabled: PYTORCH_ROCM_ARCH (${PYTORCH_ROCM_ARCH}) has no MI3xx arch (gfx942/gfx950)")
+    message(STATUS "USE_MSLK disabled: PYTORCH_ROCM_ARCH (${PYTORCH_ROCM_ARCH}) has no supported arch (gfx942/gfx950/gfx1250)")
     caffe2_update_option(USE_MSLK OFF)
   endif()
   if(USE_MSLK AND USE_ROCM)

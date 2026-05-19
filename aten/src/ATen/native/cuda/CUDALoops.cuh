@@ -262,7 +262,8 @@ __global__ void vectorized_elementwise_kernel(int N, func_t f, array_t data) {
   constexpr auto io_size = calc_io_size<func_t>();
   constexpr auto tws_942 = 16;
   constexpr auto tws = elems_per_thread<io_size>();
-  if (__builtin_amdgcn_processor_is("gfx942"))
+  if (__builtin_amdgcn_processor_is("gfx942") ||
+      __builtin_amdgcn_processor_is("gfx1250"))
     return vectorized_elementwise_kernel_impl<vec_size, tws_942>(N, f, data);
 
   vectorized_elementwise_kernel_impl<vec_size, tws>(N, f, data);

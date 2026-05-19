@@ -18,8 +18,19 @@ constexpr size_t kSmallBuffer = 2097152;
 constexpr size_t kMinBlockSize = 512;
 // largest "small" allocation is 1 MiB
 constexpr size_t kSmallSize = 1048576;
+// XXX: This is likely ineffective because allocator config is host-side code
+// and __gfx1250__ is normally a HIP device compilation macro.
+// FIXME: Gate on a runtime arch check at allocator init.
+// Runtime path blocked by `constexpr size_t min_allowed_segment_size_mb = kMinLargeAlloc / kMB;`
+// at c10/core/AllocatorConfig.cpp, and per-device arch makes mixed-GPU correctness non-trivial.
+#if defined(USE_ROCM) && defined(__gfx1250__)
+// Increase the buffer threshold for gfx1250
+// to avoid fragmentation on 432GB devices.
+constexpr size_t kMinLargeAlloc = 20 * 1024 * 1024;  // 20 MiB
+#else
 // allocations between 1 and 10 MiB may use kLargeBuffer
-constexpr size_t kMinLargeAlloc = 10485760;
+constexpr size_t kMinLargeAlloc = 10485760;  // 10 MiB
+#endif
 // round up large allocations to 2 MiB
 constexpr size_t kRoundLarge = 2097152;
 
