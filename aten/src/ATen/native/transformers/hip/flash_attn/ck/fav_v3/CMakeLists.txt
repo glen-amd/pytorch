@@ -48,6 +48,7 @@ set(AITER_EMBEDDED_HSA_HEADER "${AITER_EMBEDDED_HSA_HEADER_DIR}/aiter_embedded_h
 set(GENERATE_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/generate_aiter_embedded_hsa.py")
 
 # Generate the embedded HSA header using Python script (much faster than CMake loops)
+# TODO: gfx1250/fmha_v3_bwd
 execute_process(
     COMMAND python3 ${GENERATE_SCRIPT}
             --hsa-dir ${AITER_HSA_DIR}

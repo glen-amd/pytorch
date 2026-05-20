@@ -211,9 +211,11 @@ if(USE_FLASH_ATTENTION)
     elseif(NOT WIN32)
       caffe2_update_option(USE_ROCM_CK_SDPA ON)
     endif()
-    # CK SDPA only supports gfx942/gfx950/gfx1250. Auto-disable when none of those archs
-    # are in PYTORCH_ROCM_ARCH; otherwise the ck_sdpa target ends up with an
-    # empty HIP_ARCHITECTURES and CMake errors out.
+    # CK SDPA only supports gfx942/gfx950/gfx1250. Auto-disable when none of
+    # those archs are in PYTORCH_ROCM_ARCH; otherwise the ck_sdpa target ends up
+    # with an empty HIP_ARCHITECTURES and CMake errors out.
+    # XXX: This needs FAv3/AITER artifacts to be ready for gfx1250.
+    # Ref.: aten/src/ATen/native/transformers/hip/flash_attn/ck/fav_v3/CMakeLists.txt
     if(USE_ROCM_CK_SDPA)
       set(_have_ck_sdpa_arch FALSE)
       foreach(ARCH gfx942 gfx950 gfx1250)
@@ -312,7 +314,9 @@ if(USE_FLASH_ATTENTION)
 
     # Only build for supported architectures (gfx942/gfx950/gfx1250) as building
     # for all targets takes too long.
-    # We will selectively add supported architectures when/if needed
+    # We will selectively add supported architectures when/if needed.
+    # XXX: This needs FAv3/AITER artifacts to be ready for gfx1250.
+    # Ref.: aten/src/ATen/native/transformers/hip/flash_attn/ck/fav_v3/CMakeLists.txt
     set(_ck_sdpa_hip_arches "")
     foreach(ARCH gfx942 gfx950 gfx1250)
       if("${ARCH}" IN_LIST PYTORCH_ROCM_ARCH)

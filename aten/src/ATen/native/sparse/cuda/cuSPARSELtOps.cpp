@@ -46,10 +46,11 @@ static bool isHipSparseLtSupported() {
 
     // Return cached result (platform-wide)
     if (!g_hipSparseLtSupported) {
+        // FIXME: gfx1250 - ROCm 7.2 or later?
         TORCH_CHECK(
             false,
             "hipSparseLt not supported on this device, supported architectures: "
-            "gfx950, gfx942. "
+            "gfx950, gfx942, gfx1250 "
             "required ROCM version: 6.4.0 or later.");
     }
     return g_hipSparseLtSupported;
