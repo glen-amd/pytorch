@@ -135,8 +135,9 @@ inline __host__ __device__ uint32_t getAlignmentRoundUp(const void* p) {
 
 #if defined(USE_ROCM)
 // TODO: Support RDNA
-// CDNA arch with MFMA and Wave64 support.
-// FIXME: GFX1250 warp/wavefront size
+// CDNA MFMA path with Wave64 support. GFX1250 is Wave32 and uses SWMMAC/WMMA
+// style instructions, so the host entry points below reject it before launching
+// this Wave64-specific layout/kernel path.
 constexpr int32_t kWarpSize = 64;
 
 template<typename T, uint32_t Rank>
@@ -146,15 +147,10 @@ using VecT = T __attribute__((ext_vector_type(Rank)));
 // gfx1250 cannot simply be added to the CDNA2+ path below.
 // gfx950 (CDNA4) vs. gfx1250
 // MFMA vs. WMMA
-// Wave64/32 vs. Wave32 only
+// Wave64 vs. Wave32 only
 // Intrinsics __builtin_amdgcn_mfma_* vs. __builtin_amdgcn_wmma_*
 //
 // Maybe different tile sizes, layouts, register layouts, and loading patterns.
-#ifdef __gfx1250__
-#define GFX12_CDNA5_OR_LATER 1
-#else
-#define GFX12_CDNA5_OR_LATER 0
-#endif
 
 static bool isCDNA5orLater(int index) {
   return at::detail::getCUDAHooks().isGPUArch({"gfx1250"}, index);
@@ -461,9 +457,9 @@ struct BLayout_TC_int4 {
   template <int KTilesToLoad>
   static __device__ void load(
       // type uint32, size [n / 8][k / (InnerKTiles * 16)][32][InnerKTiles / 2]
-      // n-tiles: n / 8 for NV, n /16 for AMD
-      // k / (InnerKTiles * 16): TC size per k-tile is 16 (m16n8k16 for NV, m16n16k16 for AMD)
-      // value per warp lane: 32 for NV, 64 for AMD
+      // n-tiles: n / 8 for NV, n /16 for the current ROCm MFMA path
+      // k / (InnerKTiles * 16): TC size per k-tile is 16 (m16n8k16 for NV, m16n16k16 for ROCm MFMA)
+      // value per warp lane: 32 for NV, 64 for the current ROCm MFMA path
       // (InnerKTiles / 2): B layout has 4 values per lane (16 bits) per k-tile.
       // 2 k-tiles packed is a uint32 (hence InnerKTiles == 2 is our smallest
       // value) 4 k-tiles packed is a uint32x2 (64 bits) 8 k-tiles packed is a
@@ -1101,7 +1097,7 @@ __global__ void matrix_to_m16n8k16_Bint4_layout(
     // inner k-tiles pack two at a time
 #if defined(USE_ROCM)
     // The output tensor shape is [ceil(n / 8)][ceil(k / (InnerKTiles * 16))][32][InnerKTiles / 2], which is specific to Nvidia
-    // But AMD needs [ceil(n / 16)][ceil(k / (InnerKTiles * 16))][64][InnerKTiles / 2]
+    // But the current ROCm MFMA path needs [ceil(n / 16)][ceil(k / (InnerKTiles * 16))][64][InnerKTiles / 2]
     // So construct the pointer accordingly
     auto bPtr = out.data() +
       ((nTile * out.size(1) * kWarpSize * (InnerKTiles / 2)) +
@@ -1361,8 +1357,9 @@ at::Tensor _convert_weight_to_int4pack_cuda(
   // each block handles `innerKTiles` k-tiles.
   // 2 k-tiles are a single int32
   //
-  // We use the same shape for AMD gpus also to match the GPT-FAST spec.
-  // Will index it correctly when dereferencing the quantized weight tensor pointer.
+  // We use the same external shape for the current ROCm MFMA path to match the
+  // GPT-FAST spec. The internal pointer arithmetic above indexes the Wave64
+  // layout correctly. GFX1250 is rejected above until a Wave32 WMMA layout exists.
   auto out = at::empty(
       {nTilesTensor, kSuperTiles, 32, innerKTiles / 2},
       at::TensorOptions().dtype(at::kInt).device(in.device()));

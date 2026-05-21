@@ -3091,8 +3091,10 @@ def _device_warp_size_for_heuristics() -> int:
     try:
         warp_size = torch.cuda.get_device_properties().warp_size
     except (AssertionError, AttributeError, RuntimeError):
-        # Preserve the historical ROCm heuristic when device properties are not
-        # available during config construction.
+        # Preserve the historical ROCm heuristic when device properties
+        # are not available during config construction.
+        # Or alternative:
+        # Default to 32 (Wave32 is now the GFX12.x norm).
         return 64
 
     return warp_size or 64

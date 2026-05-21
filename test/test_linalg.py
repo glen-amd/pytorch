@@ -73,7 +73,7 @@ def blaslt_supported_device():
             # because the exact landing version may shift.
             # Prefix checks rather than exact matches treat MI-series / gfx1250
             # as BLASLt-capable.
-            archs.append('gfx125')
+            archs.append('gfx1250')
             for arch in archs:
                 if arch in torch.cuda.get_device_properties(0).gcnArchName:
                     return True

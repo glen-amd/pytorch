@@ -41,6 +41,9 @@ using namespace rocshmem;
 namespace c10d::nvshmem_extension {
 
 #define THREADS_PER_BLOCK 512
+// The 2-D AllToAllV WarpScan path below is currently written for a 64-lane
+// ROCm wave. Wave32-only targets need target-aware WARP_SIZE and host-side
+// limit checks before this path is enabled for them.
 #define WARP_SIZE 64
 
 namespace {
@@ -395,10 +398,10 @@ void all_to_all_vdev(
 
 // Start of `all_to_all_vdev_2d`
 
-// This is an warp-scope, exclusive prefix sum. When called by a block of
-// threads, each warp will perform an independent prefix sum, concurrently.
-// Returns the sum of all elements in the warp.
-// `NUM_WARPS` is the number of warps participating the concurrent prefix sum.
+// This is a warp/wave-scope, exclusive prefix sum. When called by a block of
+// threads, each warp/wave will perform an independent prefix sum, concurrently.
+// Returns the sum of all elements in the warp/wave.
+// `NUM_WARPS` is the number of warps/waves participating the concurrent prefix sum.
 template <int NUM_WARPS>
 __device__ int64_t prefixSum_warp(int64_t *odata, int64_t *idata, int n) {
   CUDA_KERNEL_ASSERT(n <= WARP_SIZE);
@@ -601,10 +604,8 @@ __global__ void allToAllV_2d(void *send_data, void *recv_data, int64_t* in_split
 
   // Starting offset of each tile
   __shared__ int64_t start_offset_per_tile[NUM_TILES];
-  // Prefix sum again to get the tiles' start offsets.
-  // `NUM_TILES` is typically not greater than 32, because 32 tiles * 32 threads
-  // = 1024 threads, and this kernel is launched within 1024 threads. Thus, we
-  // can use warp-scope prefix sum.
+  // Prefix sum again to get the tiles' start offsets. `NUM_TILES` is
+  // THREADS_PER_BLOCK / WARP_SIZE, so a single warp/wave can cover it.
   static_assert(NUM_TILES <= WARP_SIZE);
   // Only 1 warp is needed
   prefixSum_warp<1>(start_offset_per_tile, len_per_tile, NUM_TILES);
