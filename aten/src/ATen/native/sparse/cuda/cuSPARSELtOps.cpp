@@ -30,7 +30,14 @@ static void initHipSparseLtSupport() {
     // Check only the first available device
     try {
         if (at::cuda::device_count() > 0) {
-            g_hipSparseLtSupported = at::detail::getCUDAHooks().isGPUArch({"gfx950", "gfx942", "gfx1250"}, 0);
+            // gfx1250 hipSparseLt support requires ROCm 7.2+; only advertise it
+            // when built against a new enough ROCm so the claim matches what the
+            // runtime can actually honor.
+            std::vector<std::string> supported_archs = {"gfx950", "gfx942"};
+#if ROCM_VERSION >= 70200
+            supported_archs.push_back("gfx1250");
+#endif
+            g_hipSparseLtSupported = at::detail::getCUDAHooks().isGPUArch(supported_archs, 0);
         }
     } catch (const std::exception&) {
         // If an exception occurs during device property check, we assume hipSparseLt is not supported

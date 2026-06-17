@@ -625,8 +625,14 @@ _scaled_mm_out_cuda(const Tensor& mat1, const Tensor& mat2,
   else if (scaling_choice_a == ScalingType::BlockWise1x32 && scaling_choice_b == ScalingType::BlockWise1x32) {
 #ifdef USE_ROCM
     #if ROCM_VERSION >= 70000
-    // GFX1250 is expected to support MX block-wise scaling like GFX950.
-    TORCH_CHECK_NOT_IMPLEMENTED(at::detail::getCUDAHooks().isGPUArch({"gfx950", "gfx1250"}),
+    // gfx1250 MX block-wise scaling requires ROCm 7.2+, matching the gate in
+    // _scaled_mm_allowed_device(); only advertise it when built against 7.2+.
+    TORCH_CHECK_NOT_IMPLEMENTED(at::detail::getCUDAHooks().isGPUArch({
+                "gfx950",
+    #if ROCM_VERSION >= 70200
+                "gfx1250",
+    #endif
+                }),
                 "Block-wise scaling for Float8_e8m0fnu is only supported on gfx950/gfx1250");
 
     int packed_factor = 1;
@@ -1068,7 +1074,14 @@ _scaled_mxfp8_mxfp8(
 
 #ifdef USE_ROCM
 #if ROCM_VERSION >= 70000
-  TORCH_CHECK_NOT_IMPLEMENTED(at::detail::getCUDAHooks().isGPUArch({"gfx950", "gfx1250"}),
+  // gfx1250 MX block-wise scaling requires ROCm 7.2+, matching the gate in
+  // _scaled_mm_allowed_device(); only advertise it when built against 7.2+.
+  TORCH_CHECK_NOT_IMPLEMENTED(at::detail::getCUDAHooks().isGPUArch({
+              "gfx950",
+#if ROCM_VERSION >= 70200
+              "gfx1250",
+#endif
+              }),
               "Block-wise scaling for Float8_e8m0fnu is only supported on gfx950/gfx1250");
 
   TORCH_CHECK_VALUE(mat_a.size(0) % 32 == 0 && mat_a.size(1) % 32 == 0 &&
@@ -1155,7 +1168,14 @@ _scaled_mxfp4_mxfp4(
   auto scaling_choice_b = ScalingType::BlockWise1x32;
 
 #if ROCM_VERSION >= 70000
-  TORCH_CHECK_NOT_IMPLEMENTED(at::detail::getCUDAHooks().isGPUArch({"gfx950", "gfx1250"}),
+  // gfx1250 MX block-wise scaling requires ROCm 7.2+, matching the gate in
+  // _scaled_mm_allowed_device(); only advertise it when built against 7.2+.
+  TORCH_CHECK_NOT_IMPLEMENTED(at::detail::getCUDAHooks().isGPUArch({
+              "gfx950",
+#if ROCM_VERSION >= 70200
+              "gfx1250",
+#endif
+              }),
               "Block-wise scaling for Float8_e8m0fnu is only supported on gfx950/gfx1250");
 
   TORCH_CHECK_VALUE(mat_a.size(0) % 32 == 0 && mat_a.size(1) % 32 == 0 &&

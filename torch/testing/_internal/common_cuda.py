@@ -76,7 +76,11 @@ def CDNA2OrLater():
 
 def evaluate_platform_supports_flash_attention():
     if TEST_WITH_ROCM:
-        arch_list = ["gfx90a", "gfx942", "gfx1100", "gfx1201", "gfx950", "gfx1250"]
+        # NOTE: gfx1250 is omitted until flash-attention artifacts ship for it:
+        # AOTriton has no published gfx1250 image (see cmake/External/aotriton.cmake)
+        # and the CK FAv3/AITER codegen is not yet wired for gfx1250
+        # (see aten/src/ATen/native/transformers/hip/flash_attn/ck/fav_v3/CMakeLists.txt).
+        arch_list = ["gfx90a", "gfx942", "gfx1100", "gfx1201", "gfx950"]
         if os.environ.get("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "0") != "0":
             arch_list += ["gfx1101", "gfx1102", "gfx1150", "gfx1151", "gfx1200"]
         return evaluate_gfx_arch_within(arch_list)
@@ -94,7 +98,9 @@ def evaluate_platform_supports_ck_sdpa():
 
 def evaluate_platform_supports_efficient_attention():
     if TEST_WITH_ROCM:
-        arch_list = ["gfx90a", "gfx942", "gfx1100", "gfx1201", "gfx950", "gfx1250"]
+        # NOTE: gfx1250 is omitted until mem-efficient-attention artifacts ship
+        # for it (no AOTriton gfx1250 image, CK FAv3/AITER codegen not yet wired).
+        arch_list = ["gfx90a", "gfx942", "gfx1100", "gfx1201", "gfx950"]
         if os.environ.get("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "0") != "0":
             arch_list += ["gfx1101", "gfx1102", "gfx1150", "gfx1151", "gfx1200"]
         return evaluate_gfx_arch_within(arch_list)

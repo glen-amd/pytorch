@@ -299,15 +299,36 @@ bool check_sm_version(cudaDeviceProp * dprops) {
   return is_gte_lower_bound && is_lte_upper_bound;
 }
 
+#if USE_ROCM && USE_ROCM_ATTENTION
+// Architectures for which the CK SDPA backend is actually built. Keep this in
+// sync with the CK SDPA HIP arch filters in aten/src/ATen/CMakeLists.txt.
+// gfx1250 is excluded until FAv3/AITER artifacts ship for it, otherwise forcing
+// the CK backend on a gfx1250 device passes the hardware check and then fails at
+// kernel launch with a missing code object.
+bool check_ck_sdpa_hardware_support() {
+  return at::detail::getCUDAHooks().isGPUArch({"gfx942", "gfx950"});
+}
+#endif
+
 bool check_flash_attention_hardware_support(sdp_params const& params, bool debug) {
   // Check that the gpu is capable of running flash attention
   using sm80 = SMVersion<8, 0>;
   using sm121 = SMVersion<12, 1>;
 #if USE_ROCM
 #if USE_ROCM_ATTENTION
-  // TODO: For gfx1250 support, gate CK path on FAv3 readiness—see fav_v3/CMakeLists.txt
   if(at::globalContext().getROCmFAPreferredBackend() == at::ROCmFABackend::Ck) {
-    // User explicitly set CK as the flash attention backend. Return true for now
+    // User explicitly set CK as the flash attention backend, but CK SDPA is only
+    // built for a subset of archs. Reject devices it was not built for (e.g.
+    // gfx1250) so we fail the capability check instead of at kernel launch.
+    if (!check_ck_sdpa_hardware_support()) {
+      if (debug) {
+        auto dprops = at::cuda::getCurrentDeviceProperties();
+        TORCH_WARN(
+            "CK flash attention backend was requested but is not built for the current AMD GPU architecture ",
+            dprops->gcnArchName);
+      }
+      return false;
+    }
     // TODO: Flesh out sanity checks
     return true;
   } else {
@@ -366,9 +387,19 @@ bool check_mem_efficient_hardware_support(sdp_params const& params, bool debug) 
   if (at::cuda::device_count() == 0) {
     return false;
   }
-// TODO: gfx1250
   if(at::globalContext().getROCmFAPreferredBackend() == at::ROCmFABackend::Ck) {
-    // User explicitly set CK as the flash attention backend. Return true for now
+    // User explicitly set CK as the flash attention backend, but CK SDPA is only
+    // built for a subset of archs. Reject devices it was not built for (e.g.
+    // gfx1250) so we fail the capability check instead of at kernel launch.
+    if (!check_ck_sdpa_hardware_support()) {
+      if (debug) {
+        auto dprops = at::cuda::getCurrentDeviceProperties();
+        TORCH_WARN(
+            "CK mem efficient attention backend was requested but is not built for the current AMD GPU architecture ",
+            dprops->gcnArchName);
+      }
+      return false;
+    }
     // TODO: Flesh out sanity checks
     return true;
   } else {

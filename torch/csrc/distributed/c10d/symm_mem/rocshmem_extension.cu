@@ -34,6 +34,7 @@
 
 #include <ATen/hip/cub.cuh>
 
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/hip/HIPException.h>
 #include <rocshmem/rocshmem.hpp>
 
@@ -41,12 +42,27 @@ using namespace rocshmem;
 namespace c10d::nvshmem_extension {
 
 #define THREADS_PER_BLOCK 512
-// The 2-D AllToAllV WarpScan path below is currently written for a 64-lane
-// ROCm wave. Wave32-only targets need target-aware WARP_SIZE and host-side
-// limit checks before this path is enabled for them.
+// The AllToAllV WarpScan paths below are written for a 64-lane ROCm wave
+// (WarpScan over WARP_SIZE lanes, tile sizing derived from it). They are only
+// correct on Wave64 hardware; Wave32-only targets (e.g. gfx1250) would require
+// target-aware WARP_SIZE and tile/limit retuning before they can be enabled.
+// `checkWave64Device` rejects non-Wave64 devices at launch so we fail loudly
+// instead of silently corrupting results on lanes that do not exist.
 #define WARP_SIZE 64
 
 namespace {
+
+void checkWave64Device(const at::Device& device) {
+  const auto warp_size = at::cuda::getDeviceProperties(device.index())->warpSize;
+  TORCH_CHECK(
+      warp_size == WARP_SIZE,
+      "rocSHMEM AllToAllv collectives require a 64-lane (Wave64) device, but "
+      "device ",
+      device.index(),
+      " has warp size ",
+      warp_size,
+      ". This path is not yet supported on Wave32 architectures.");
+}
 
 bool parse_rocshmem_version_ge(
     const char* version,
@@ -364,6 +380,7 @@ void all_to_all_vdev(
   TORCH_CHECK_EQ(input.device(), out.device());
   auto device = input.device();
   c10::cuda::CUDAGuard guard(device);
+  checkWave64Device(device);
   auto& team_manager = TeamManager::get(device);
   auto team = team_manager.get_team(group_name, input_hdl->get_rank_to_global_rank());
   auto stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -730,6 +747,7 @@ void all_to_all_vdev_2d(
       out_splits_offsets.device() == device,
       "all tensor arguments must be on the same CUDA device");
   c10::cuda::CUDAGuard guard(device);
+  checkWave64Device(device);
   auto stream = at::cuda::getCurrentCUDAStream();
   auto& team_manager = TeamManager::get(device);
   auto team = team_manager.get_team(group_name, input_hdl->get_rank_to_global_rank());
@@ -848,6 +866,7 @@ void all_to_all_vdev_2d_offset(
       out_splits_offsets.device() == device,
       "all tensor arguments must be on the same CUDA device");
   c10::cuda::CUDAGuard guard(device);
+  checkWave64Device(device);
   auto stream = at::cuda::getCurrentCUDAStream();
   auto& team_manager = TeamManager::get(device);
   auto team = team_manager.get_team(group_name, input_hdl->get_rank_to_global_rank());

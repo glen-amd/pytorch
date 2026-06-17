@@ -477,9 +477,13 @@ class _CudaKernel:
         if torch.version.hip:
             # navi, CDNA1-CDNA3 allows a max of 64KB shared memory,
             # CDNA4 (gfx950) 160KB, and CDNA5 (gfx1250) 320KB.
-            if device_props.gcnArchName == "gfx950":
+            # Strip feature suffixes (e.g. "gfx1250:sramecc+:xnack-") before
+            # matching, otherwise the exact comparison silently falls through to
+            # the 64KB default on real devices.
+            gcn_arch = device_props.gcnArchName.split(":", 1)[0]
+            if gcn_arch == "gfx950":
                 max_shared_mem = 160 * 1024
-            elif device_props.gcnArchName == "gfx1250":
+            elif gcn_arch == "gfx1250":
                 max_shared_mem = 320 * 1024
             else:
                 max_shared_mem = 65536

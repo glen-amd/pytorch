@@ -211,21 +211,22 @@ if(USE_FLASH_ATTENTION)
     elseif(NOT WIN32)
       caffe2_update_option(USE_ROCM_CK_SDPA ON)
     endif()
-    # CK SDPA only supports gfx942/gfx950/gfx1250. Auto-disable when none of
+    # CK SDPA only supports gfx942/gfx950. Auto-disable when none of
     # those archs are in PYTORCH_ROCM_ARCH; otherwise the ck_sdpa target ends up
     # with an empty HIP_ARCHITECTURES and CMake errors out.
-    # XXX: This needs FAv3/AITER artifacts to be ready for gfx1250.
+    # TODO: Add gfx1250 once FAv3/AITER artifacts are generated for it; the
+    # AITER codegen (AITER_GPU_ARCHS) and AOTriton image must ship first.
     # Ref.: aten/src/ATen/native/transformers/hip/flash_attn/ck/fav_v3/CMakeLists.txt
     if(USE_ROCM_CK_SDPA)
       set(_have_ck_sdpa_arch FALSE)
-      foreach(ARCH gfx942 gfx950 gfx1250)
+      foreach(ARCH gfx942 gfx950)
         if("${ARCH}" IN_LIST PYTORCH_ROCM_ARCH)
           set(_have_ck_sdpa_arch TRUE)
           break()
         endif()
       endforeach()
       if(NOT _have_ck_sdpa_arch)
-        message(STATUS "USE_ROCM_CK_SDPA disabled: PYTORCH_ROCM_ARCH (${PYTORCH_ROCM_ARCH}) has no supported arch (gfx942/gfx950/gfx1250)")
+        message(STATUS "USE_ROCM_CK_SDPA disabled: PYTORCH_ROCM_ARCH (${PYTORCH_ROCM_ARCH}) has no supported arch (gfx942/gfx950)")
         caffe2_update_option(USE_ROCM_CK_SDPA OFF)
       endif()
     endif()
@@ -312,13 +313,13 @@ if(USE_FLASH_ATTENTION)
 
     set_source_files_properties(${ck_sdpa_sources_hip} PROPERTIES LANGUAGE HIP)
 
-    # Only build for supported architectures (gfx942/gfx950/gfx1250) as building
+    # Only build for supported architectures (gfx942/gfx950) as building
     # for all targets takes too long.
     # We will selectively add supported architectures when/if needed.
-    # XXX: This needs FAv3/AITER artifacts to be ready for gfx1250.
+    # TODO: Add gfx1250 once FAv3/AITER artifacts are generated for it.
     # Ref.: aten/src/ATen/native/transformers/hip/flash_attn/ck/fav_v3/CMakeLists.txt
     set(_ck_sdpa_hip_arches "")
-    foreach(ARCH gfx942 gfx950 gfx1250)
+    foreach(ARCH gfx942 gfx950)
       if("${ARCH}" IN_LIST PYTORCH_ROCM_ARCH)
         list(APPEND _ck_sdpa_hip_arches ${ARCH})
       endif()

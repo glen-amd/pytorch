@@ -3091,10 +3091,10 @@ def _device_warp_size_for_heuristics() -> int:
     try:
         warp_size = torch.cuda.get_device_properties().warp_size
     except (AssertionError, AttributeError, RuntimeError):
-        # Preserve the historical ROCm heuristic when device properties
-        # are not available during config construction.
-        # Or alternative:
-        # Default to 32 (Wave32 is now the GFX12.x norm).
+        # Device properties are not available during config construction.
+        # Fall back to 64, which preserves the historical ROCm (Wave64)
+        # heuristic. Wave32 parts like gfx1250 report a real warp size of 32
+        # when properties are queryable, so they take the branch above.
         return 64
 
     return warp_size or 64
@@ -3237,9 +3237,14 @@ def triton_config(
     znumel = size_hints.get("z")
 
     # Increase x to satisfy min_elem_per_thread requirements.
+    # NOTE: Keep this expressed in 32-lane units (_NUM_THREADS_PER_WARP), not the
+    # device warp size. Using the real warp size would double this min block size
+    # on Wave64 archs (gfx942/gfx950) relative to historical behavior, a silent
+    # perf change for already-shipping parts. gfx1250 is Wave32, so its real warp
+    # size is already 32 and it is unaffected by keeping the constant here.
     block_size = max(
         conditional_product(x, y, z),
-        min_elem_per_thread * warp_size * num_warps,
+        min_elem_per_thread * _NUM_THREADS_PER_WARP * num_warps,
     )
     x *= math.ceil(block_size / conditional_product(x, y, z))
 

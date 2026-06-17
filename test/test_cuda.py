@@ -9206,15 +9206,13 @@ class TestCompileKernel(TestCase):
 
         # Test error handling with more than supported shared memory size
         if torch.version.hip:
+            # Strip feature suffixes (e.g. "gfx1250:sramecc+:xnack-") before
+            # matching so this mirrors set_shared_memory_config in torch/cuda/_utils.py.
+            gcn_arch = get_device_properties().gcnArchName.split(":", 1)[0]
             max_smem = (
                 65536
-                if get_device_properties().gcnArchName
-                not in ["gfx950", "gfx1250"]
-                else (
-                    320 * 1024
-                    if get_device_properties().gcnArchName == "gfx1250"
-                    else 160 * 1024
-                )
+                if gcn_arch not in ["gfx950", "gfx1250"]
+                else (320 * 1024 if gcn_arch == "gfx1250" else 160 * 1024)
             )
         else:
             max_smem = get_device_properties().shared_memory_per_block_optin
