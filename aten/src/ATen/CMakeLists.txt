@@ -667,11 +667,37 @@ if(USE_ROCM)
     ${native_quantized_hip_hip}
     ${native_transformers_hip_hip} ${native_transformers_src_hip_hip}
   )
-  if(NOT USE_ROCM_CK_GEMM)
-    file(GLOB native_hip_bgemm CONFIGURE_DEPENDS "native/hip/bgemm_kernels/*.hip")
-    file(GLOB native_hip_ck CONFIGURE_DEPENDS "native/hip/ck*.hip")
-    exclude(ATen_HIP_SRCS "${ATen_HIP_SRCS}"
-      ${native_hip_bgemm} ${native_hip_ck})
+  file(GLOB native_hip_bgemm CONFIGURE_DEPENDS "native/hip/bgemm_kernels/*.hip")
+  file(GLOB native_hip_ck CONFIGURE_DEPENDS "native/hip/ck*.hip")
+  exclude(ATen_HIP_SRCS "${ATen_HIP_SRCS}"
+    ${native_hip_bgemm} ${native_hip_ck})
+  if(USE_ROCM_CK_GEMM)
+    # composable_kernel GEMM sources are XDL/Wave64 paths today. Keep them out
+    # of the broad torch_hip target so mixed builds containing gfx1250 do not
+    # compile these sources for gfx1250. gfx1250 should remain on hipBLASLt or
+    # fallback paths until a WMMA/SWMMAC CK implementation is available.
+    set(_ck_gemm_hip_arches "")
+    foreach(ARCH gfx90a gfx942 gfx950)
+      if("${ARCH}" IN_LIST PYTORCH_ROCM_ARCH)
+        list(APPEND _ck_gemm_hip_arches ${ARCH})
+      endif()
+    endforeach()
+    if(_ck_gemm_hip_arches STREQUAL "")
+      message(STATUS "USE_ROCM_CK_GEMM disabled: PYTORCH_ROCM_ARCH (${PYTORCH_ROCM_ARCH}) has no supported CK GEMM arch (gfx90a/gfx942/gfx950)")
+      caffe2_update_option(USE_ROCM_CK_GEMM OFF)
+    else()
+      set_source_files_properties(${native_hip_bgemm} ${native_hip_ck} PROPERTIES LANGUAGE HIP)
+      add_library(ck_gemm STATIC ${native_hip_bgemm} ${native_hip_ck})
+      set_target_properties(ck_gemm PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        HIP_ARCHITECTURES "${_ck_gemm_hip_arches}")
+      target_compile_options(ck_gemm PRIVATE ${HIP_CXX_FLAGS})
+      target_compile_definitions(ck_gemm PRIVATE USE_ROCM_CK_GEMM)
+      target_include_directories(ck_gemm PRIVATE ${ATen_HIP_INCLUDE})
+      if(TARGET torch_cpu)
+        add_dependencies(ck_gemm torch_cpu)
+      endif()
+    endif()
   endif()
 
   # TODO: Codegen separate files for HIP and use those (s/cuda_generated_sources/hip_generated_sources)
