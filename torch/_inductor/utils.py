@@ -2681,6 +2681,107 @@ def commit_tdm_operand_layout(*matrices: IRNode) -> None:
         raise AssertionError("TDM layout commit revalidation failed")
 
 
+def use_flex_tdm_descriptor(
+    *matrices: IRNode,
+    block_shapes: Sequence[Sequence[sympy.Expr | int]] | None = None,
+) -> bool:
+    """Return whether flex operands satisfy TDM descriptor and request constraints."""
+    from .virtualized import V
+
+    if not matrices or not _gfx1250_device_prereqs(matrices[0].get_device()):
+        return False
+
+    if block_shapes is None:
+        block_shapes = [()] * len(matrices)
+    elif len(block_shapes) != len(matrices):
+        raise AssertionError("Expected one block shape per flex descriptor operand")
+
+    def _reject(mat: IRNode, reason: str) -> bool:
+        log.debug("Flex TDM descriptor rejected for %s: %s", mat.get_name(), reason)
+        return False
+
+    def operand_admissible(
+        mat: IRNode, block_shape: Sequence[sympy.Expr | int]
+    ) -> bool:
+        reject = functools.partial(_reject, mat)
+
+        if mat.get_dtype() not in _TDM_SUPPORTED_DTYPES:
+            return reject(f"unsupported dtype {mat.get_dtype()}")
+        sizes = mat.get_size()
+        strides = mat.get_stride()
+        if len(sizes) != 4 or len(strides) != 4:
+            return reject("expected four-dimensional sizes and strides")
+        if mat.get_name() in V.graph.unaligned_buffers:
+            return reject("buffer is marked unaligned")
+
+        # Alignment stays symbolic so it can be proven without specializing
+        # dynamic sequence lengths; unprovable alignment disables TDM.
+        offset = mat.get_layout().offset
+        itemsize = mat.get_dtype().itemsize
+
+        aligned = _bytes_aligned
+
+        # Rules 1 and 2 from the constants above, in that order.
+        if not V.graph.sizevars.statically_known_equals(strides[-1], 1):
+            return reject("innermost stride is not statically known to be one")
+        if not aligned(offset * itemsize, _TDM_OPERAND_ALIGNMENT_BYTES):
+            return reject(f"offset is not {_TDM_OPERAND_ALIGNMENT_BYTES}-byte aligned")
+
+        if block_shape and len(block_shape) != 2:
+            return reject("expected a two-dimensional block shape")
+
+        # The extent actually requested: block width if given, else the dim.
+        innermost = block_shape[-1] if block_shape else sizes[-1]
+        if not V.graph.sizevars.statically_known_geq(
+            innermost * itemsize, _TDM_MIN_INNERMOST_REQUEST_BYTES
+        ):
+            return reject(
+                "innermost request extent is not statically known to hold at "
+                f"least {_TDM_MIN_INNERMOST_REQUEST_BYTES} bytes"
+            )
+
+        # Keep 16-byte legality independent of the provisional 128-byte policy below.
+        if not all(
+            aligned(s * itemsize, _TDM_OPERAND_ALIGNMENT_BYTES) for s in strides[:-1]
+        ):
+            return reject(
+                f"outer strides are not {_TDM_OPERAND_ALIGNMENT_BYTES}-byte aligned"
+            )
+
+        # Rule 3: relative only.
+        if not all(
+            aligned(s * itemsize, _TDM_DIRECT_PATH_RELATIVE_POLICY_BYTES)
+            for s in strides[:-1]
+        ):
+            return reject("outer strides are not 128-byte aligned")
+        if block_shape and not aligned(
+            block_shape[-1] * itemsize,
+            _TDM_DIRECT_PATH_RELATIVE_POLICY_BYTES,
+        ):
+            return reject("block width is not 128-byte aligned")
+
+        return True
+
+    # List-wide and guard-free, as in ``_tdm_operands_compatible``: rejecting a
+    # later operand must not leave guards behind for an earlier one.
+    if not all(
+        operand_admissible(mat, block_shape)
+        for mat, block_shape in zip(matrices, block_shapes)
+    ):
+        return False
+
+    # Bounds only: this does not pin a dynamic sequence length.
+    if not _descriptor_shapes_fit_in_int32(
+        [mat.get_size() for mat in matrices], add_guards=True
+    ):
+        log.debug(
+            "Flex TDM descriptor rejected for %s: shapes do not fit in int32",
+            [mat.get_name() for mat in matrices],
+        )
+        return False
+    return True
+
+
 def _tma_descriptor_max_offset_fits_in_int32(
     mat: IRNode, add_guards: bool = False
 ) -> bool:
