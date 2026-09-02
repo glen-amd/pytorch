@@ -35,6 +35,7 @@ from ...kernel.mm_plus_mm import mm_plus_mm_template
 from ...kernel_inputs import KernelInputs, MMKernelInputs
 from ...runtime.hints import DeviceProperties
 from ...utils import (
+    _rocm_version_tuple,
     _TDM_DIRECT_PATH_RELATIVE_POLICY_BYTES,
     _TDM_MIN_INNERMOST_REQUEST_BYTES,
     commit_tdm_operand_layout,
@@ -78,11 +79,7 @@ def _use_template_autows() -> bool:
 # Check if running on ROCm
 IS_ROCM = torch.version.hip is not None
 
-_rocm_version = (
-    tuple(int(v) for v in torch.version.rocm.split(".")[:2])  # type: ignore[union-attr]
-    if torch.version.rocm is not None
-    else (0, 0)
-)
+_rocm_version = _rocm_version_tuple()
 # First ROCm version where origami is not supported.
 ORIGAMI_UNSUPPORTED_ROCM_VERSION = (10, 0)
 
@@ -2885,6 +2882,10 @@ class TMATemplateConfigMixin(TMAWorkspaceMixin, MMTemplateConfigMixin):
     """
     TMA-specific mixin that uses persistent configs and adds TMA options.
     This inherits from MMTemplateConfigMixin and overrides config generation.
+
+    ``ROCmPersistentTDMTemplateConfigHeuristic`` feeds the same Jinja template
+    with deliberately different probes (unit-stride row-majorness, stable
+    descriptor API, no workspace). Keep both in sync when adding a variable.
     """
 
     def _get_template_configs_impl(
@@ -3435,6 +3436,8 @@ class ROCmPersistentTDMTemplateConfigHeuristic(
         # can empty the pool. Specializing for a template that then contributes
         # nothing is the defect this ordering avoids.
         generated = super()._get_template_configs_impl(kernel_inputs, op_name, **kwargs)
+        # Same Jinja template as TMATemplateConfigMixin, deliberately different
+        # probes; see that class for why the two option blocks stay separate.
         configs = [
             {
                 **template_kwargs,

@@ -1966,6 +1966,27 @@ def use_triton_template(
     )
 
 
+def _bytes_aligned(expr_bytes: _IntLike, alignment: int = TMA_ALIGNMENT) -> bool:
+    """Statically-known multiple-of test for a byte-valued expression."""
+    from .virtualized import V
+
+    return V.graph.sizevars.statically_known_multiple_of(expr_bytes, alignment)
+
+
+def _single_unit_stride_dim(strides_i: Sequence[_IntLike]) -> int | None:
+    """Index of the sole unit-stride dim, or None when there is not exactly one."""
+    from .virtualized import V
+
+    inner = [
+        i
+        for i, stride in enumerate(strides_i)
+        if V.graph.sizevars.statically_known_equals(stride, 1)
+    ]
+    if len(inner) != 1:
+        return None
+    return inner[0]
+
+
 def can_use_tma(
     *matrices: IRNode, output_layout: Layout | None = None, add_guards: bool = False
 ) -> bool:
@@ -1987,8 +2008,7 @@ def can_use_tma(
 
     from .virtualized import V
 
-    def _aligned(expr_bytes: int | sympy.Expr) -> bool:
-        return V.graph.sizevars.statically_known_multiple_of(expr_bytes, TMA_ALIGNMENT)
+    _aligned = _bytes_aligned
 
     def _is_tma_compatible_layout(layout: Layout | None) -> bool:
         if layout is None:
@@ -2043,14 +2063,9 @@ def can_use_tma(
             ]
 
         # Find the single contiguous ("inner") dim
-        inner = [
-            i
-            for i, st in enumerate(strides_i)
-            if V.graph.sizevars.statically_known_equals(st, 1)
-        ]
-        if len(inner) != 1:
+        inner_idx = _single_unit_stride_dim(strides_i)
+        if inner_idx is None:
             return False
-        inner_idx = inner[0]
 
         # All "outer" dims must have 16-byte aligned strides
         for i, st in enumerate(strides_i):
@@ -2151,16 +2166,32 @@ def is_gfx1250_arch(arch: str) -> bool:
     return arch.split(":", 1)[0] == "gfx1250"
 
 
-# `torch.version.hip` is process-constant, so the parse only has to happen once.
+# The torch.version attributes are process-constant, so the parse happens once.
 @functools.cache
-def _rocm_version_at_least(major: int, minor: int) -> bool:
-    version = torch.version.hip
+def _rocm_version_tuple() -> tuple[int, int]:
+    """Return the ROCm SDK ``(major, minor)``, or ``(0, 0)`` if unavailable.
+
+    ``torch.version.rocm`` carries CMake's ``ROCM_VERSION_DEV``, which PyTorch's
+    own ROCm component gates compare (see the 7.14 hipfile gate in
+    ``cmake/public/LoadHIP.cmake``), so it wins. ``torch.version.hip`` carries
+    ``HIP_VERSION_CLEAN`` and is consulted only when ``rocm`` is absent. A
+    present-but-malformed ``rocm`` fails closed rather than falling through.
+    """
+    version = getattr(torch.version, "rocm", None)
     if not version:
-        return False
+        version = torch.version.hip
+    if not version:
+        return (0, 0)
     match = re.match(r"(\d+)\.(\d+)", version)
     if match is None:
+        return (0, 0)
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def _rocm_version_at_least(major: int, minor: int) -> bool:
+    if not torch.version.hip:
         return False
-    return (int(match.group(1)), int(match.group(2))) >= (major, minor)
+    return _rocm_version_tuple() >= (major, minor)
 
 
 def _gfx1250_device_prereqs(device: torch.device | None) -> bool:
@@ -2191,16 +2222,10 @@ def _tdm_row_major_from_strides(strides_i: Sequence[sympy.Expr | int]) -> bool |
     Split out of ``tdm_descriptor_row_major`` so callers that already resolved
     the strides do not resolve (or re-specialize) them twice.
     """
-    from .virtualized import V
-
-    inner = [
-        i
-        for i, stride in enumerate(strides_i)
-        if V.graph.sizevars.statically_known_equals(stride, 1)
-    ]
-    if len(inner) != 1:
+    inner_idx = _single_unit_stride_dim(strides_i)
+    if inner_idx is None:
         return None
-    return inner[0] == 1
+    return inner_idx == 1
 
 
 def tdm_descriptor_row_major(mat: IRNode) -> bool | None:
@@ -2243,8 +2268,7 @@ def _tdm_operand_compatible(
     outer_idx = 0 if row_major else 1
     itemsize = dtype.itemsize
 
-    def aligned(expr: sympy.Expr, alignment: int) -> bool:
-        return V.graph.sizevars.statically_known_multiple_of(expr, alignment)
+    aligned = _bytes_aligned
 
     # Operand policy (rule 2). The innermost block extent (rule 1) is checked by
     # the template config filter, not by constraining the tensor extent here.
@@ -2393,8 +2417,7 @@ def use_flex_tdm_descriptor(
         offset = mat.get_layout().offset
         itemsize = mat.get_dtype().itemsize
 
-        def aligned(expr: sympy.Expr | int, alignment: int) -> bool:
-            return V.graph.sizevars.statically_known_multiple_of(expr, alignment)
+        aligned = _bytes_aligned
 
         # Rules 1 and 2 from the constants above, in that order.
         if not V.graph.sizevars.statically_known_equals(strides[-1], 1):
@@ -2415,6 +2438,7 @@ def use_flex_tdm_descriptor(
                 f"least {_TDM_MIN_INNERMOST_REQUEST_BYTES} bytes"
             )
 
+        # Keep 16-byte legality independent of the provisional 128-byte policy below.
         if not all(
             aligned(s * itemsize, _TDM_OPERAND_ALIGNMENT_BYTES) for s in strides[:-1]
         ):

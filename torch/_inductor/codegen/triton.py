@@ -2914,9 +2914,28 @@ class TMACompatibilityChecker:
     force: bool
     # Inductor buffer name being loaded from / stored to.
     buffer_name: str | None = None
+    # Compilation- and device-scoped; see _gfx1250_capable.
+    _gfx1250_cache: tuple[torch.device, bool] | None = dataclasses.field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self):
         self.failed_debug_prefix = "Cannot use TMA descriptor for load / store since: "
+
+    def _gfx1250_capable(self, device: torch.device) -> bool:
+        """Cache the gfx1250 descriptor probe for this checker only.
+
+        ``_gfx1250_device_prereqs`` is deliberately not memoized process-wide, so
+        a transient device-property failure cannot disable TDM everywhere.
+        Re-probes on a device change rather than assuming one checker cannot
+        span devices.
+        """
+        cached = self._gfx1250_cache
+        if cached is not None and cached[0] == device:
+            return cached[1]
+        capable = use_gfx1250_descriptor_codegen(device)
+        self._gfx1250_cache = (device, capable)
+        return capable
 
     # Also see Note: TMA API Restrictions for the below
     def can_use_tma(
@@ -2943,7 +2962,10 @@ class TMACompatibilityChecker:
             # constraints below do not apply.
             return True
 
-        gfx1250_capable = use_gfx1250_descriptor_codegen(device)
+        gfx1250_capable = self._gfx1250_capable(device)
+        # Keep the short-circuit: once gfx1250 capability is established the
+        # CUDA/XPU probes below cannot change the result, and
+        # torch.cuda.get_device_capability() is uncached.
         cuda_xpu_capable = not gfx1250_capable and (
             (
                 (
@@ -3022,7 +3044,7 @@ class TMACompatibilityChecker:
             shape = block_params.shape
             constant_offset_expr = sympy.sympify(constant_offset)
 
-        if use_gfx1250_descriptor_codegen(device):
+        if self._gfx1250_capable(device):
             if not 1 <= len(shape) <= 5:
                 log.debug(
                     "%s TDM descriptors require rank between 1 and 5. Shape is: %s",

@@ -5934,19 +5934,21 @@ class TestTDMConfigDenseAndGeneric(TestCase):
     def test_tdm_device_prereqs_use_runtime_floor_and_backend_probe(self):
         from torch._inductor.utils import (
             _gfx1250_device_prereqs,
-            _rocm_version_at_least,
+            _rocm_version_tuple,
         )
 
         props = mock.Mock(gcnArchName="gfx1250:sramecc+:xnack-")
         device = torch.device("cuda")
 
-        # _rocm_version_at_least memoizes a value that is fixed for a real
-        # process; this test patches torch.version.hip, so drop the cache
-        # between scenarios.
-        self.addCleanup(_rocm_version_at_least.cache_clear)
+        # _rocm_version_tuple memoizes a value that is fixed for a real process;
+        # this test patches the version attributes, so drop the cache between
+        # scenarios. Both attributes are patched because the tuple helper prefers
+        # `rocm` and only falls back to `hip`.
+        self.addCleanup(_rocm_version_tuple.cache_clear)
 
-        _rocm_version_at_least.cache_clear()
+        _rocm_version_tuple.cache_clear()
         with (
+            mock.patch("torch.version.rocm", "7.14.0"),
             mock.patch("torch.version.hip", "7.14"),
             mock.patch("torch.cuda.get_device_properties", return_value=props),
             mock.patch(
@@ -5957,8 +5959,9 @@ class TestTDMConfigDenseAndGeneric(TestCase):
             self.assertFalse(_gfx1250_device_prereqs(device))
             supports_tdm.assert_called_once_with("gfx1250:sramecc+:xnack-")
 
-        _rocm_version_at_least.cache_clear()
+        _rocm_version_tuple.cache_clear()
         with (
+            mock.patch("torch.version.rocm", "7.14.0"),
             mock.patch("torch.version.hip", "7.14"),
             mock.patch("torch.cuda.get_device_properties", return_value=props),
             mock.patch(
@@ -5968,14 +5971,41 @@ class TestTDMConfigDenseAndGeneric(TestCase):
         ):
             self.assertTrue(_gfx1250_device_prereqs(device))
 
-        _rocm_version_at_least.cache_clear()
+        _rocm_version_tuple.cache_clear()
         with (
+            mock.patch("torch.version.rocm", "7.13.0"),
             mock.patch("torch.version.hip", "7.13"),
             mock.patch("torch.cuda.get_device_properties") as get_props,
         ):
             self.assertFalse(_gfx1250_device_prereqs(device))
             # The version floor must short-circuit before the device probe.
             get_props.assert_not_called()
+
+    @parametrize(
+        "rocm,hip,expected",
+        (
+            ("7.14.0", "6.2.41133", (7, 14)),  # rocm wins over a differing hip
+            (None, "7.14.41133", (7, 14)),  # absent rocm falls back to hip
+            ("garbage", "7.14", (0, 0)),  # malformed rocm fails closed
+            (None, None, (0, 0)),  # neither available
+        ),
+    )
+    def test_rocm_version_tuple_prefers_sdk_and_fails_closed(self, rocm, hip, expected):
+        # torch.version.rocm carries CMake's ROCM_VERSION_DEV, which is what
+        # PyTorch's own ROCm component gates compare, so it wins over hip.
+        from torch._inductor.utils import _rocm_version_at_least, _rocm_version_tuple
+
+        self.addCleanup(_rocm_version_tuple.cache_clear)
+        _rocm_version_tuple.cache_clear()
+        with (
+            mock.patch("torch.version.rocm", rocm),
+            mock.patch("torch.version.hip", hip),
+        ):
+            self.assertEqual(_rocm_version_tuple(), expected)
+            # Prove the TDM gate itself consumes that value, not just the parser.
+            self.assertEqual(
+                _rocm_version_at_least(7, 14), bool(hip) and expected >= (7, 14)
+            )
 
     def test_tdm_backend_probe_strips_arch_features(self):
         from torch.utils._triton import has_triton_amd_tdm_device
@@ -6598,7 +6628,7 @@ class TestTDMConfigDenseAndGeneric(TestCase):
             mock.patch(
                 "torch._inductor.codegen.triton.use_gfx1250_descriptor_codegen",
                 return_value=True,
-            ),
+            ) as capable,
         ):
             checker = TMACompatibilityChecker(
                 kernel, torch.float16, for_store=False, force=False
@@ -6614,6 +6644,24 @@ class TestTDMConfigDenseAndGeneric(TestCase):
                     BlockParameters(shape=[torch.iinfo(torch.int32).max + 1])
                 )
             )
+            # The probe reaches uncached device properties, so one checker must
+            # resolve capability once across both methods and all three calls.
+            capable.assert_called_once()
+
+        # A false result must cache too: an early return is not a cache miss.
+        with (
+            V.set_graph_handler(graph),
+            mock.patch(
+                "torch._inductor.codegen.triton.use_gfx1250_descriptor_codegen",
+                return_value=False,
+            ) as incapable,
+        ):
+            checker = TMACompatibilityChecker(
+                kernel, torch.float16, for_store=False, force=False
+            )
+            self.assertFalse(checker.can_use_tma())
+            checker.are_block_parameters_compatible(BlockParameters(shape=[128] * 6))
+            incapable.assert_called_once()
 
     def test_tdm_generic_descriptor_checker_force_path_enforces_shape_bounds(self):
         from torch._inductor.codegen.triton import (
