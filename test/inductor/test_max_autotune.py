@@ -6646,6 +6646,138 @@ class TestTDMConfigDenseAndGeneric(TestCase):
             issubclass(ROCmAddMMPersistentTDMTemplateConfigHeuristic, AddMMConfigMixin)
         )
 
+    def test_tdm_generic_descriptor_gate_composes_optins(self):
+        from torch._inductor.utils import use_gfx1250_descriptor_codegen
+
+        device = torch.device("cuda")
+        base = {"triton.use_tensor_descriptor": True, "assume_aligned_inputs": True}
+        with mock.patch(self._PREREQS, return_value=True):
+            with config.patch(base):
+                self.assertTrue(use_gfx1250_descriptor_codegen(device))
+            for option in base:
+                with config.patch({**base, option: False}):
+                    self.assertFalse(use_gfx1250_descriptor_codegen(device))
+        # Same enabled config, capability false: the device probe contains it.
+        with mock.patch(self._PREREQS, return_value=False), config.patch(base):
+            self.assertFalse(use_gfx1250_descriptor_codegen(device))
+
+    def test_tdm_generic_descriptor_checker_preserves_backend_dtype_policy(self):
+        from torch._inductor.codegen.triton import TMACompatibilityChecker
+
+        kernel = mock.Mock(no_x_dim=False)
+        graph = mock.Mock()
+        graph.get_current_device_or_throw.return_value = mock.Mock(type="cuda")
+        with (
+            V.set_graph_handler(graph),
+            mock.patch(
+                "torch._inductor.codegen.triton.use_gfx1250_descriptor_codegen",
+                return_value=True,
+            ),
+        ):
+            self.assertTrue(
+                TMACompatibilityChecker(
+                    kernel, torch.float16, for_store=False, force=False
+                ).can_use_tma()
+            )
+            self.assertFalse(
+                TMACompatibilityChecker(
+                    kernel, torch.float8_e4m3fn, for_store=False, force=False
+                ).can_use_tma()
+            )
+
+    def test_tdm_generic_descriptor_checker_enforces_shape_bounds(self):
+        from torch._inductor.codegen.triton import (
+            BlockParameters,
+            TMACompatibilityChecker,
+        )
+
+        class FakeSizeVars:
+            @staticmethod
+            def statically_known_true(expr):
+                return bool(expr)
+
+        kernel = mock.Mock(no_x_dim=False)
+        graph = mock.Mock(sizevars=FakeSizeVars())
+        graph.get_current_device_or_throw.return_value = mock.Mock(type="cuda")
+        with (
+            V.set_graph_handler(graph),
+            mock.patch(
+                "torch._inductor.codegen.triton.use_gfx1250_descriptor_codegen",
+                return_value=True,
+            ) as capable,
+        ):
+            checker = TMACompatibilityChecker(
+                kernel, torch.float16, for_store=False, force=False
+            )
+            self.assertTrue(checker.can_use_tma())
+            self.assertFalse(
+                checker.are_block_parameters_compatible(
+                    BlockParameters(shape=[128] * 6)
+                )
+            )
+            self.assertFalse(
+                checker.are_block_parameters_compatible(
+                    BlockParameters(shape=[torch.iinfo(torch.int32).max + 1])
+                )
+            )
+            # The probe reaches uncached device properties, so one checker must
+            # resolve capability once across both methods and all three calls.
+            capable.assert_called_once()
+
+        # A false result must cache too: an early return is not a cache miss.
+        with (
+            V.set_graph_handler(graph),
+            mock.patch(
+                "torch._inductor.codegen.triton.use_gfx1250_descriptor_codegen",
+                return_value=False,
+            ) as incapable,
+        ):
+            checker = TMACompatibilityChecker(
+                kernel, torch.float16, for_store=False, force=False
+            )
+            self.assertFalse(checker.can_use_tma())
+            checker.are_block_parameters_compatible(BlockParameters(shape=[128] * 6))
+            incapable.assert_called_once()
+
+    def test_tdm_generic_descriptor_checker_force_path_enforces_shape_bounds(self):
+        from torch._inductor.codegen.triton import (
+            BlockParameters,
+            TMACompatibilityChecker,
+        )
+
+        class FakeSizeVars:
+            @staticmethod
+            def replace_backed_symbols_with_hints(expr):
+                return expr
+
+            @staticmethod
+            def statically_known_true(expr):
+                return bool(expr)
+
+        kernel = mock.Mock(no_x_dim=False)
+        graph = mock.Mock(sizevars=FakeSizeVars())
+        graph.get_current_device_or_throw.return_value = mock.Mock(type="cuda")
+        with (
+            V.set_graph_handler(graph),
+            mock.patch(
+                "torch._inductor.codegen.triton.use_gfx1250_descriptor_codegen",
+                return_value=True,
+            ),
+        ):
+            checker = TMACompatibilityChecker(
+                kernel, torch.float16, for_store=False, force=True
+            )
+            self.assertFalse(
+                checker.are_block_parameters_compatible(
+                    BlockParameters(shape=[128] * 6)
+                )
+            )
+            self.assertFalse(
+                checker.are_block_parameters_compatible(
+                    BlockParameters(shape=[torch.iinfo(torch.int32).max + 1])
+                )
+            )
+
 
 def simple_fn():
     return 42
@@ -6890,6 +7022,15 @@ class TestTDMEndToEnd(TestCase):
         ):
             return run_and_get_code(torch.compile(fn), *args)
 
+    def _compile_generic_and_get_code(self, fn, *args):
+        with config.patch(
+            {
+                "triton.use_tensor_descriptor": True,
+                "assume_aligned_inputs": True,
+            }
+        ):
+            return run_and_get_code(torch.compile(fn), *args)
+
     def test_tdm_dense_mm_correctness_and_selection(self):
         def fn(a, b):
             return torch.mm(a, b)
@@ -6934,6 +7075,25 @@ class TestTDMEndToEnd(TestCase):
         self.assertIn("make_tensor_descriptor", joined)
         self.assertIn("load_tensor_descriptor", joined)
         torch.testing.assert_close(result, fn(bias, a, b), atol=2e-2, rtol=2e-2)
+
+    def test_tdm_generic_pointwise_correctness_and_selection(self):
+        def fn(x, y):
+            return x + y
+
+        x = torch.randn(1024, 1024, device=GPU_TYPE, dtype=torch.float16)
+        y = torch.randn(1024, 1024, device=GPU_TYPE, dtype=torch.float16)
+        result, code = self._compile_generic_and_get_code(fn, x, y)
+        self.assertIn("make_tensor_descriptor", "\n".join(code))
+        torch.testing.assert_close(result, fn(x, y), atol=1e-3, rtol=1e-3)
+
+    def test_tdm_generic_reduction_correctness_and_selection(self):
+        def fn(x):
+            return x.sum(dim=1)
+
+        x = torch.randn(1024, 1024, device=GPU_TYPE, dtype=torch.float32)
+        result, code = self._compile_generic_and_get_code(fn, x)
+        self.assertIn("make_tensor_descriptor", "\n".join(code))
+        torch.testing.assert_close(result, fn(x), atol=1e-3, rtol=1e-3)
 
 
 if __name__ == "__main__":
